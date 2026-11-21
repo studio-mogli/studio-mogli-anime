@@ -7,17 +7,12 @@ object AppConfig {
     const val ANILIST_URL = "https://graphql.anilist.co/"
 
     // =========================================================================
-    // STREAMING API MIRRORS (PASTE NEW OPEN-SOURCE OR SELF-HOSTED URLs HERE)
+    // DIRECT ON-DEVICE SCRAPER TARGET (Runs from User's Phone IP - No 403!)
     // =========================================================================
-    // Primary: Open-source Anime-API (HiAnime / AniWatch scraper) mirrors
-    val animeApiMirrors = listOf(
-        "https://api-anime-rouge.vercel.app",
-        "https://aninescraper.vercel.app"
-    )
+    const val DIRECT_SCRAPE_BASE_URL = "https://zanix.tr"
 
-    // Secondary fallbacks (Consumet & Anify)
-    var consumetBaseUrl = "https://api.consumet.org"
-    var anifyBaseUrl = "https://anify.eltik.cc"
+    // Optional fallback backend URL (Render/Vercel)
+    const val HIANIME_API_BASE_URL = "https://hianime-api-y1pr.onrender.com"
 
     // Studio Mogli links
     const val STUDIO_MOGLI_URL = "https://studiomogli.com"

@@ -1,8 +1,15 @@
 package com.studiomogli.app.ui.player
 
+import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.pm.ActivityInfo
 import android.net.Uri
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.annotation.OptIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -30,6 +37,7 @@ import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.ui.PlayerView
 import com.studiomogli.app.ui.home.HomeViewModel
 import okhttp3.OkHttpClient
+import java.io.ByteArrayInputStream
 
 @OptIn(UnstableApi::class)
 @Composable
@@ -59,65 +67,118 @@ fun VideoPlayerScreen(viewModel: HomeViewModel) {
 
     val currentStream = stream ?: return
 
-    val exoPlayer = remember(currentStream.hlsUrl) {
-        val headers = mutableMapOf("User-Agent" to "Mozilla/5.0")
-        currentStream.referer?.let { headers["Referer"] = it }
-
-        val dataSourceFactory = OkHttpDataSource.Factory(OkHttpClient())
-            .setDefaultRequestProperties(headers)
-
-        val trackSelector = DefaultTrackSelector(context).apply {
-            setParameters(
-                buildUponParameters()
-                    .setPreferredAudioLanguage(preferredLang)
-                    .setPreferredTextLanguage(preferredLang)
-            )
-        }
-
-        ExoPlayer.Builder(context)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
-            .setTrackSelector(trackSelector)
-            .build()
-            .apply {
-                val subtitleConfigs = currentStream.subtitles.map { sub ->
-                    MediaItem.SubtitleConfiguration.Builder(Uri.parse(sub.url))
-                        .setMimeType(MimeTypes.TEXT_VTT)
-                        .setLanguage(sub.languageCode)
-                        .setLabel(sub.label)
-                        .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
-                        .build()
-                }
-
-                val mediaItem = MediaItem.Builder()
-                    .setUri(currentStream.hlsUrl)
-                    .setMimeType(MimeTypes.APPLICATION_M3U8)
-                    .setSubtitleConfigurations(subtitleConfigs)
-                    .build()
-
-                setMediaItem(mediaItem)
-                prepare()
-                playWhenReady = true
-            }
-    }
-
-    DisposableEffect(exoPlayer) {
-        onDispose { exoPlayer.release() }
-    }
-
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
     ) {
-        AndroidView(
-            factory = { ctx ->
-                PlayerView(ctx).apply {
-                    player = exoPlayer
-                    useController = true
-                    setShowSubtitleButton(true)
+        if (currentStream.isEmbed) {
+            EmbedWebViewPlayer(
+                embedUrl = currentStream.hlsUrl,
+                referer = currentStream.referer ?: "https://zanix.tr/"
+            )
+        } else {
+            val exoPlayer = remember(currentStream.hlsUrl) {
+                val headers = mutableMapOf("User-Agent" to "Mozilla/5.0")
+                currentStream.referer?.let { headers["Referer"] = it }
+
+                val dataSourceFactory = OkHttpDataSource.Factory(OkHttpClient())
+                    .setDefaultRequestProperties(headers)
+
+                val trackSelector = DefaultTrackSelector(context).apply {
+                    setParameters(
+                        buildUponParameters()
+                            .setPreferredAudioLanguage(preferredLang)
+                            .setPreferredTextLanguage(preferredLang)
+                    )
                 }
-            },
-            modifier = Modifier.fillMaxSize()
+
+                ExoPlayer.Builder(context)
+                    .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
+                    .setTrackSelector(trackSelector)
+                    .build()
+                    .apply {
+                        val subtitleConfigs = currentStream.subtitles.map { sub ->
+                            MediaItem.SubtitleConfiguration.Builder(Uri.parse(sub.url))
+                                .setMimeType(MimeTypes.TEXT_VTT)
+                                .setLanguage(sub.languageCode)
+                                .setLabel(sub.label)
+                                .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
+                                .build()
+                        }
+
+                        val mediaItem = MediaItem.Builder()
+                            .setUri(currentStream.hlsUrl)
+                            .setMimeType(MimeTypes.APPLICATION_M3U8)
+                            .setSubtitleConfigurations(subtitleConfigs)
+                            .build()
+
+                        setMediaItem(mediaItem)
+                        prepare()
+                        playWhenReady = true
+                    }
+            }
+
+            DisposableEffect(exoPlayer) {
+                onDispose { exoPlayer.release() }
+            }
+
+            AndroidView(
+                factory = { ctx ->
+                    PlayerView(ctx).apply {
+                        player = exoPlayer
+                        useController = true
+                        setShowSubtitleButton(true)
+                    }
+                },
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+    }
+}
+
+@SuppressLint("SetJavaScriptEnabled")
+@Composable
+private fun EmbedWebViewPlayer(embedUrl: String, referer: String) {
+    val blockedHosts = remember {
+        listOf(
+            "doubleclick", "googlesyndication", "adservice", "popads",
+            "propellerads", "exoclick", "juicyads", "adsterra", "mc.yandex"
         )
     }
+
+    AndroidView(
+        factory = { ctx ->
+            WebView(ctx).apply {
+                setBackgroundColor(android.graphics.Color.BLACK)
+                settings.javaScriptEnabled = true
+                settings.domStorageEnabled = true
+                settings.mediaPlaybackRequiresUserGesture = false
+                settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                settings.setSupportMultipleWindows(false)
+                settings.javaScriptCanOpenWindowsAutomatically = false
+
+                webChromeClient = WebChromeClient()
+                webViewClient = object : WebViewClient() {
+                    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                        // Block popup redirects to ad domains
+                        val host = request?.url?.host?.lowercase() ?: return true
+                        val embedHost = Uri.parse(embedUrl).host?.lowercase() ?: ""
+                        return host != embedHost
+                    }
+
+                    override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+                        val url = request?.url?.toString()?.lowercase() ?: return null
+                        if (blockedHosts.any { url.contains(it) }) {
+                            return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
+                        }
+                        return super.shouldInterceptRequest(view, request)
+                    }
+                }
+
+                loadUrl(embedUrl, mapOf("Referer" to referer))
+            }
+        },
+        modifier = Modifier.fillMaxSize()
+    )
 }

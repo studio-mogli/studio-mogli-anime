@@ -17,7 +17,7 @@ data class EpisodeItem(
     val id: String,
     val number: Int,
     val title: String,
-    val provider: String // "Aniwatch", "Consumet", or "Anify"
+    val provider: String // "DirectZanix" or fallback
 )
 
 data class SubtitleTrack(
@@ -30,7 +30,8 @@ data class StreamResult(
     val hlsUrl: String,
     val referer: String? = null,
     val subtitles: List<SubtitleTrack> = emptyList(),
-    val providerUsed: String
+    val providerUsed: String,
+    val isEmbed: Boolean = false
 )
 
 data class GitHubUpdateInfo(

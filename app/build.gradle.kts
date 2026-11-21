@@ -66,6 +66,7 @@ dependencies {
     implementation("com.squareup.retrofit2:retrofit:2.11.0")
     implementation("com.squareup.retrofit2:converter-gson:2.11.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("org.jsoup:jsoup:1.18.3")
 
     // Media3 ExoPlayer (HLS .m3u8 + Subtitles + Custom Headers)
     implementation("androidx.media3:media3-exoplayer:1.5.1")
