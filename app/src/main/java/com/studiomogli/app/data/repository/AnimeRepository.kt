@@ -113,34 +113,43 @@ class AnimeRepository {
     }
 
     /**
-     * Multi-provider episode fetcher for maximum catalog coverage:
-     * Tries Aniwatch-API (HiAnime) -> Consumet -> Anify in order.
+     * Multi-provider episode fetcher:
+     * 1. Active open-source Anime-API mirrors (AniWatch / HiAnime)
+     * 2. Consumet
+     * 3. Anify
      */
     suspend fun fetchEpisodesMultiProvider(anime: AnimeItem): List<EpisodeItem> {
         val encoded = URLEncoder.encode(anime.title, "UTF-8")
 
-        // 1. Try Aniwatch-API (HiAnime)
-        try {
-            val base = AppConfig.aniwatchBaseUrl.trimEnd('/')
-            val searchJson = streamApi.getJson("$base/api/v2/hianime/search?q=$encoded&page=1").asJsonObject
-            val animes = searchJson.getAsJsonObject("data")?.getAsJsonArray("animes")
-            if (animes != null && animes.size() > 0) {
-                val id = animes[0].asJsonObject.get("id").asString
-                val epJson = streamApi.getJson("$base/api/v2/hianime/anime/$id/episodes").asJsonObject
-                val episodes = epJson.getAsJsonObject("data")?.getAsJsonArray("episodes")
-                if (episodes != null && episodes.size() > 0) {
-                    return episodes.mapIndexed { index, el ->
-                        val ep = el.asJsonObject
-                        EpisodeItem(
-                            id = ep.get("episodeId").asString,
-                            number = ep.get("number")?.asInt ?: (index + 1),
-                            title = ep.get("title")?.takeIf { !it.isJsonNull }?.asString ?: "Episode ${index + 1}",
-                            provider = "Aniwatch"
-                        )
+        // 1. Try Anime-API mirrors (api-anime-rouge.vercel.app & aninescraper.vercel.app)
+        for (mirror in AppConfig.animeApiMirrors) {
+            try {
+                val base = mirror.trimEnd('/')
+                val searchJson = streamApi.getJson("$base/aniwatch/search?keyword=$encoded&page=1").asJsonObject
+                val animes = searchJson.getAsJsonArray("animes")
+                if (animes != null && animes.size() > 0) {
+                    val animeId = animes[0].asJsonObject.get("id").asString
+                    val epJson = streamApi.getJson("$base/aniwatch/episodes/$animeId").asJsonObject
+                    val episodes = epJson.getAsJsonArray("episodes")
+                    if (episodes != null && episodes.size() > 0) {
+                        return episodes.mapIndexed { index, el ->
+                            val ep = el.asJsonObject
+                            val epId = ep.get("episodeId")?.asString ?: ep.get("id")?.asString ?: ""
+                            val epNum = ep.get("episodeNo")?.asInt ?: ep.get("number")?.asInt ?: (index + 1)
+                            val epTitle = ep.get("name")?.takeIf { !it.isJsonNull }?.asString
+                                ?: ep.get("title")?.takeIf { !it.isJsonNull }?.asString
+                                ?: "Episode $epNum"
+                            EpisodeItem(
+                                id = epId,
+                                number = epNum,
+                                title = epTitle,
+                                provider = "AnimeAPI|$base"
+                            )
+                        }
                     }
                 }
-            }
-        } catch (_: Exception) { }
+            } catch (_: Exception) { }
+        }
 
         // 2. Fallback to Consumet
         try {
@@ -165,7 +174,7 @@ class AnimeRepository {
             }
         } catch (_: Exception) { }
 
-        // 3. Fallback to Anify (direct AniList ID mapping)
+        // 3. Fallback to Anify
         try {
             val base = AppConfig.anifyBaseUrl.trimEnd('/')
             val epArray = streamApi.getJson("$base/episodes/${anime.id}").asJsonArray
@@ -186,7 +195,7 @@ class AnimeRepository {
             }
         } catch (_: Exception) { }
 
-        // Fallback sample episode list if all upstream public mirrors are unreachable
+        // Fallback sample list only if all upstream mirrors are unreachable
         val count = (anime.episodesCount ?: 12).coerceAtMost(24)
         return (1..count).map { num ->
             EpisodeItem(
@@ -199,25 +208,24 @@ class AnimeRepository {
     }
 
     /**
-     * Resolves HLS (.m3u8) stream and subtitle tracks from the selected provider.
-     * category: "sub" (Japanese) or "dub" (English/Hindi when available)
+     * Resolves HLS (.m3u8) stream and subtitle tracks from the matched provider.
      */
     suspend fun fetchStreamUrl(episode: EpisodeItem, category: String = "sub"): StreamResult {
         try {
-            when (episode.provider) {
-                "Aniwatch" -> {
-                    val base = AppConfig.aniwatchBaseUrl.trimEnd('/')
+            when {
+                episode.provider.startsWith("AnimeAPI|") -> {
+                    val base = episode.provider.substringAfter("AnimeAPI|")
+                    val encodedEpId = URLEncoder.encode(episode.id, "UTF-8")
                     val json = streamApi.getJson(
-                        "$base/api/v2/hianime/episode/sources?animeEpisodeId=${episode.id}&category=$category"
+                        "$base/aniwatch/episode-srcs?id=$encodedEpId&server=vidstreaming&category=$category"
                     ).asJsonObject
-                    val data = json.getAsJsonObject("data")
-                    val sources = data?.getAsJsonArray("sources")
+                    val sources = json.getAsJsonArray("sources")
                     val url = sources?.get(0)?.asJsonObject?.get("url")?.asString
-                    val referer = data?.getAsJsonObject("headers")?.get("Referer")?.asString
-                    val subs = data?.getAsJsonArray("tracks")?.mapNotNull { el ->
+                    val referer = json.getAsJsonObject("headers")?.get("Referer")?.asString
+                    val subs = json.getAsJsonArray("subtitles")?.mapNotNull { el ->
                         val obj = el.asJsonObject
-                        val file = obj.get("file")?.takeIf { !it.isJsonNull }?.asString ?: return@mapNotNull null
-                        val label = obj.get("label")?.takeIf { !it.isJsonNull }?.asString ?: "English"
+                        val file = obj.get("url")?.takeIf { !it.isJsonNull }?.asString ?: return@mapNotNull null
+                        val label = obj.get("lang")?.takeIf { !it.isJsonNull }?.asString ?: "English"
                         SubtitleTrack(
                             languageCode = mapLangCode(label),
                             label = label,
@@ -226,11 +234,11 @@ class AnimeRepository {
                     } ?: emptyList()
 
                     if (!url.isNullOrBlank()) {
-                        return StreamResult(hlsUrl = url, referer = referer, subtitles = subs, providerUsed = "Aniwatch-API")
+                        return StreamResult(hlsUrl = url, referer = referer, subtitles = subs, providerUsed = "Anime-API")
                     }
                 }
 
-                "Consumet" -> {
+                episode.provider == "Consumet" -> {
                     val base = AppConfig.consumetBaseUrl.trimEnd('/')
                     val json = streamApi.getJson("$base/anime/gogoanime/watch/${episode.id}").asJsonObject
                     val sources = json.getAsJsonArray("sources")
@@ -241,7 +249,7 @@ class AnimeRepository {
                     }
                 }
 
-                "Anify" -> {
+                episode.provider == "Anify" -> {
                     val base = AppConfig.anifyBaseUrl.trimEnd('/')
                     val json = streamApi.getJson("$base/sources?providerId=gogoanime&watchId=${episode.id}").asJsonObject
                     val sources = json.getAsJsonArray("sources")
@@ -253,7 +261,6 @@ class AnimeRepository {
             }
         } catch (_: Exception) { }
 
-        // Safe public HLS test stream fallback so the player works immediately even offline from mirrors
         return StreamResult(
             hlsUrl = "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8",
             providerUsed = "Fallback HLS Stream"
@@ -270,8 +277,7 @@ class AnimeRepository {
     }
 
     /**
-     * Checks GitHub Releases for a newer version than BuildConfig.VERSION_NAME.
-     * Returns null if already up-to-date or if repo is not configured yet.
+     * Checks GitHub Releases (studio-mogli/studio-mogli-anime) for a newer version.
      */
     suspend fun checkForGitHubUpdate(): GitHubUpdateInfo? {
         if (AppConfig.GITHUB_OWNER == "YOUR_GITHUB_USERNAME") return null
