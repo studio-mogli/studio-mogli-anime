@@ -7,12 +7,9 @@ object AppConfig {
     const val ANILIST_URL = "https://graphql.anilist.co/"
 
     // =========================================================================
-    // DIRECT ON-DEVICE SCRAPER TARGET (Runs from User's Phone IP - No 403!)
+    // YOUR LIVE RENDER CONSUMET API (Working /anime/gogoanime provider)
     // =========================================================================
-    const val DIRECT_SCRAPE_BASE_URL = "https://zanix.tr"
-
-    // Optional fallback backend URL (Render/Vercel)
-    const val HIANIME_API_BASE_URL = "https://hianime-api-y1pr.onrender.com"
+    const val CONSUMET_BASE_URL = "https://api-consumet-org-5kz6.onrender.com"
 
     // Studio Mogli links
     const val STUDIO_MOGLI_URL = "https://studiomogli.com"

@@ -1,10 +1,10 @@
 package com.studiomogli.app.data.repository
 
-import com.google.gson.Gson
 import com.google.gson.JsonObject
 import com.studiomogli.app.data.AppConfig
 import com.studiomogli.app.data.api.AniListApi
 import com.studiomogli.app.data.api.AniListQueries
+import com.studiomogli.app.data.api.DynamicStreamApi
 import com.studiomogli.app.data.api.GitHubUpdateApi
 import com.studiomogli.app.data.api.GraphQLRequest
 import com.studiomogli.app.data.model.AnimeItem
@@ -14,8 +14,6 @@ import com.studiomogli.app.data.model.StreamResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
-import okhttp3.Request
-import org.jsoup.Jsoup
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import java.net.URLEncoder
@@ -23,14 +21,10 @@ import java.util.concurrent.TimeUnit
 
 class AnimeRepository {
 
-    private val gson = Gson()
-
-    private val userAgent =
-        "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
-
+    // 45s timeouts so Render's free tier has time to wake up from sleep on the first request
     private val okHttp = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(20, TimeUnit.SECONDS)
+        .connectTimeout(45, TimeUnit.SECONDS)
+        .readTimeout(45, TimeUnit.SECONDS)
         .followRedirects(true)
         .build()
 
@@ -40,6 +34,13 @@ class AnimeRepository {
         .addConverterFactory(GsonConverterFactory.create())
         .build()
         .create(AniListApi::class.java)
+
+    private val streamApi: DynamicStreamApi = Retrofit.Builder()
+        .baseUrl("https://localhost/")
+        .client(okHttp)
+        .addConverterFactory(GsonConverterFactory.create())
+        .build()
+        .create(DynamicStreamApi::class.java)
 
     private val githubApi: GitHubUpdateApi = Retrofit.Builder()
         .baseUrl("https://api.github.com/")
@@ -114,71 +115,36 @@ class AnimeRepository {
         return list
     }
 
-    private fun httpGet(url: String, referer: String? = null, isAjax: Boolean = false): String? {
-        val builder = Request.Builder()
-            .url(url)
-            .header("User-Agent", userAgent)
-            .header("Accept-Language", "en-US,en;q=0.9")
-
-        if (referer != null) {
-            builder.header("Referer", referer)
-        }
-        if (isAjax) {
-            builder.header("X-Requested-With", "XMLHttpRequest")
-            builder.header("Accept", "application/json, text/javascript, */*; q=0.01")
-        } else {
-            builder.header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-        }
-
-        return okHttp.newCall(builder.build()).execute().use { resp ->
-            if (resp.isSuccessful) resp.body?.string() else null
-        }
-    }
-
     /**
-     * Direct on-device scraper for zanix.tr (runs from the user's phone IP, bypassing datacenter 403s).
+     * Fetches episodes from your live Render Consumet API (/anime/gogoanime).
      */
     suspend fun fetchEpisodesMultiProvider(anime: AnimeItem): List<EpisodeItem> = withContext(Dispatchers.IO) {
-        val base = AppConfig.DIRECT_SCRAPE_BASE_URL.trimEnd('/')
+        val base = AppConfig.CONSUMET_BASE_URL.trimEnd('/')
         val queries = listOf(anime.title, anime.romajiTitle).distinct()
 
         for (q in queries) {
             try {
-                val encoded = URLEncoder.encode(q, "UTF-8")
-                val searchHtml = httpGet("$base/search?keyword=$encoded", referer = "$base/") ?: continue
-                val searchDoc = Jsoup.parse(searchHtml)
+                // Encode spaces as %20 for URL path segment
+                val encoded = URLEncoder.encode(q, "UTF-8").replace("+", "%20")
+                val searchJson = streamApi.getJson("$base/anime/gogoanime/$encoded").asJsonObject
+                val results = searchJson.getAsJsonArray("results")
 
-                // Find first matching anime link (e.g., /watch/naruto-677 or /naruto-677)
-                val firstLink = searchDoc.select(".film_list-wrap .flw-item .film-name a, .flw-item a.film-poster-ahref")
-                    .firstOrNull()
-                    ?.attr("href")
-                    ?: continue
+                if (results != null && results.size() > 0) {
+                    // Pick the first matching anime ID
+                    val animeId = results[0].asJsonObject.get("id")?.asString ?: continue
+                    val infoJson = streamApi.getJson("$base/anime/gogoanime/info/$animeId").asJsonObject
+                    val episodes = infoJson.getAsJsonArray("episodes")
 
-                // Extract numeric ID from end of slug (e.g., "naruto-677" -> "677")
-                val slug = firstLink.substringBefore("?").trimEnd('/')
-                val numericId = slug.substringAfterLast("-")
-                if (numericId.all { it.isDigit() } && numericId.isNotEmpty()) {
-                    val epJsonStr = httpGet(
-                        "$base/ajax/v2/episode/list/$numericId",
-                        referer = "$base$firstLink",
-                        isAjax = true
-                    ) ?: continue
-
-                    val epJson = gson.fromJson(epJsonStr, JsonObject::class.java)
-                    val epHtml = epJson.get("html")?.takeIf { !it.isJsonNull }?.asString ?: continue
-                    val epDoc = Jsoup.parse(epHtml)
-                    val epElements = epDoc.select("a.ssl-item.ep-item")
-
-                    if (epElements.isNotEmpty()) {
-                        return@withContext epElements.mapIndexed { index, el ->
-                            val dataId = el.attr("data-id")
-                            val num = el.attr("data-number").toIntOrNull() ?: (index + 1)
-                            val title = el.attr("title").ifBlank { "Episode $num" }
+                    if (episodes != null && episodes.size() > 0) {
+                        return@withContext episodes.mapIndexed { index, el ->
+                            val ep = el.asJsonObject
+                            val epId = ep.get("id")?.asString ?: ""
+                            val epNum = ep.get("number")?.takeIf { !it.isJsonNull }?.asInt ?: (index + 1)
                             EpisodeItem(
-                                id = dataId,
-                                number = num,
-                                title = title,
-                                provider = "DirectZanix"
+                                id = epId,
+                                number = epNum,
+                                title = "Episode $epNum",
+                                provider = "Consumet"
                             )
                         }
                     }
@@ -186,7 +152,7 @@ class AnimeRepository {
             } catch (_: Exception) { }
         }
 
-        // Fallback sample list only if network/site is unreachable
+        // Fallback sample list only if Render is unreachable or anime not found
         val count = (anime.episodesCount ?: 12).coerceAtMost(24)
         (1..count).map { num ->
             EpisodeItem(
@@ -199,50 +165,43 @@ class AnimeRepository {
     }
 
     /**
-     * Fetches the episode server & embed/HLS stream directly from zanix.tr on-device.
+     * Resolves the direct HLS (.m3u8) video stream from your live Render Consumet API.
      */
     suspend fun fetchStreamUrl(episode: EpisodeItem, category: String = "sub"): StreamResult = withContext(Dispatchers.IO) {
-        if (episode.provider == "DirectZanix") {
-            val base = AppConfig.DIRECT_SCRAPE_BASE_URL.trimEnd('/')
+        if (episode.provider == "Consumet") {
+            val base = AppConfig.CONSUMET_BASE_URL.trimEnd('/')
             try {
-                // 1. Get available servers for this episode
-                val serversJsonStr = httpGet(
-                    "$base/ajax/v2/episode/servers?episodeId=${episode.id}",
-                    referer = "$base/",
-                    isAjax = true
-                )
-                if (serversJsonStr != null) {
-                    val serversJson = gson.fromJson(serversJsonStr, JsonObject::class.java)
-                    val serversHtml = serversJson.get("html")?.takeIf { !it.isJsonNull }?.asString
-                    if (serversHtml != null) {
-                        val doc = Jsoup.parse(serversHtml)
-                        // Prefer requested category ("sub" or "dub"), fallback to any available server
-                        val targetBlock = doc.select(".servers-$category .server-item").ifEmpty {
-                            doc.select(".server-item")
-                        }
-                        val serverId = targetBlock.firstOrNull()?.attr("data-id")
+                val json = streamApi.getJson("$base/anime/gogoanime/watch/${episode.id}").asJsonObject
+                val sources = json.getAsJsonArray("sources")
+                val referer = json.getAsJsonObject("headers")
+                    ?.get("Referer")
+                    ?.takeIf { !it.isJsonNull }
+                    ?.asString
 
-                        if (!serverId.isNullOrBlank()) {
-                            // 2. Get source link for the chosen server
-                            val sourceJsonStr = httpGet(
-                                "$base/ajax/v2/episode/sources?id=$serverId",
-                                referer = "$base/",
-                                isAjax = true
-                            )
-                            if (sourceJsonStr != null) {
-                                val sourceJson = gson.fromJson(sourceJsonStr, JsonObject::class.java)
-                                val link = sourceJson.get("link")?.takeIf { !it.isJsonNull }?.asString
-                                if (!link.isNullOrBlank()) {
-                                    val isDirectM3u8 = link.contains(".m3u8", ignoreCase = true)
-                                    return@withContext StreamResult(
-                                        hlsUrl = link,
-                                        referer = "$base/",
-                                        providerUsed = "DirectZanix",
-                                        isEmbed = !isDirectM3u8
-                                    )
-                                }
-                            }
+                if (sources != null && sources.size() > 0) {
+                    // Prefer 1080p / 720p / default quality .m3u8 source
+                    var bestUrl: String? = null
+                    val preferredQualities = listOf("1080p", "720p", "default", "backup")
+                    for (quality in preferredQualities) {
+                        val match = sources.firstOrNull { el ->
+                            el.asJsonObject.get("quality")?.asString.equals(quality, ignoreCase = true)
                         }
+                        if (match != null) {
+                            bestUrl = match.asJsonObject.get("url")?.asString
+                            break
+                        }
+                    }
+                    if (bestUrl.isNullOrBlank()) {
+                        bestUrl = sources[0].asJsonObject.get("url")?.asString
+                    }
+
+                    if (!bestUrl.isNullOrBlank()) {
+                        return@withContext StreamResult(
+                            hlsUrl = bestUrl,
+                            referer = referer,
+                            providerUsed = "Consumet (GogoAnime)",
+                            isEmbed = false
+                        )
                     }
                 }
             } catch (_: Exception) { }
