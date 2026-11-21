@@ -16,8 +16,8 @@ android {
         versionName = "1.0.0"
 
         // Update these with your GitHub username and repo name for live in-app updates
-        buildConfigField("String", "GITHUB_OWNER", "\"YOUR_GITHUB_USERNAME\"")
-        buildConfigField("String", "GITHUB_REPO", "\"StudioMogliAnime\"")
+        buildConfigField("String", "GITHUB_OWNER", "\"studio-mogli\"")
+        buildConfigField("String", "GITHUB_REPO", "\"studio-mogli-anime\"")
     }
 
     buildTypes {
